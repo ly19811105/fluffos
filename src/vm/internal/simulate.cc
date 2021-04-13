@@ -207,9 +207,9 @@ static int give_uid_to_object(object_t *ob) {
    * again, because creator_name will be lost !
    */
   if (strcmp(current_object->uid->name, creator_name) == 0) {
-/*
- * The loaded object has the same uid as the loader.
- */
+    /*
+     * The loaded object has the same uid as the loader.
+     */
     ob->uid = current_object->uid;
     ob->euid = current_object->euid;
     return 1;
