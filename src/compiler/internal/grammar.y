@@ -2827,13 +2827,17 @@ catch:
 tree:
   L_TREE block
     {
+#ifdef DEBUG
       $$ = new_node_no_line();
       lpc_tree_form($2.node, $$);
+#endif
     }
   | L_TREE '(' comma_expr ')'
     {
+#ifdef DEBUG
       $$ = new_node_no_line();
       lpc_tree_form($3, $$);
+#endif
     }
 ;
 
