@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <memory>
 
 #include "applies_table.autogen.h"
 #include "base/internal/lru_cache.h"
@@ -528,6 +529,7 @@ refed_t *lv_owner;
 static struct {
   int32_t index;
   svalue_t *owner;
+  std::unique_ptr<EGCSmartIterator> iter;
 } global_lvalue_codepoint;
 static svalue_t global_lvalue_codepoint_sv = {T_LVALUE_CODEPOINT};
 
@@ -563,18 +565,16 @@ void push_indexed_lvalue(int reverse) {
 
     switch (lv->type) {
       case T_STRING: {
-        size_t count;
-        auto success = u8_egc_count(lv->u.string, &count);
-        DEBUG_CHECK(!success, "Bad UTF-8 String: push_indexed_lvalue");
-
         if (reverse) {
-          ind = count - ind;
+          if (ind <= 0) error("Index out of bounds in string index lvalue.\n");
+          ind = -1 * ind;
+        } else {
+          if (ind < 0) error("Index out of bounds in string index lvalue.\n");
         }
-        if (ind >= count || ind < 0) {
+        UChar32 c = u8_egc_index_as_single_codepoint(lv->u.string, SVALUE_STRLEN(lv), ind);
+        if (c == -2 || c == 0) {
           error("Index out of bounds in string index lvalue.\n");
-        }
-        UChar32 c = u8_egc_index_as_single_codepoint(lv->u.string, ind);
-        if (c < 0) {
+        } else if (c < 0) {
           error("Indexed character is multi-codepoint.\n");
         }
         unlink_string_svalue(lv);
@@ -582,6 +582,8 @@ void push_indexed_lvalue(int reverse) {
         sp->u.lvalue = &global_lvalue_codepoint_sv;
         global_lvalue_codepoint.index = ind;
         global_lvalue_codepoint.owner = lv;
+        global_lvalue_codepoint.iter =
+            std::make_unique<EGCSmartIterator>(lv->u.string, SVALUE_STRLEN(lv));
 #ifdef REF_RESERVED_WORD
         lv_owner_type = T_STRING;
         lv_owner = (refed_t *)lv->u.string;
@@ -715,8 +717,9 @@ static svalue_t global_lvalue_range_sv = {T_LVALUE_RANGE};
 
 static void push_lvalue_range(int code) {
   int32_t ind1, ind2;
-  size_t size = 0, u8len = 0;
+  size_t size = 0;
   svalue_t *lv;
+  std::unique_ptr<EGCSmartIterator> iter = nullptr;
 
   {
     switch ((lv = global_lvalue_range.owner = sp->u.lvalue)->type) {
@@ -725,8 +728,8 @@ static void push_lvalue_range(int code) {
         break;
       case T_STRING: {
         size = SVALUE_STRLEN(lv);
-        auto success = u8_egc_count(lv->u.string, &u8len);
-        if (!success) {
+        iter = std::make_unique<EGCSmartIterator>(lv->u.string, size);
+        if (!iter->ok()) {
           error("Invalid UTF-8 String: push_lvalue_range");
         }
         unlink_string_svalue(lv);
@@ -747,14 +750,9 @@ static void push_lvalue_range(int code) {
 
   if (lv->type == T_STRING) {
     ind2 = sp->u.number;
-    ind2 = (code & 0x01) ? (u8len - ind2) : ind2;
-    ind2 = ind2 + 1;
-    if (ind2 < 0 || ind2 > u8len) {
-      error(
-          "The 2nd index to range lvalue must be >= -1 and < sizeof(indexed "
-          "value)\n");
-    }
-    ind2 = u8_egc_index_to_offset(lv->u.string, ind2);
+    if (code & 0x01 && ind2 == 0) error("push_lvalue_range: invalid ind2");
+    ind2 = (code & 0x01) ? (-1 * ind2) : ind2;
+    ind2 = iter->post_index_to_offset(ind2);
     if (ind2 < 0) {
       error("push_lvalue_range: invalid ind2");
     }
@@ -774,13 +772,9 @@ static void push_lvalue_range(int code) {
 
   if (lv->type == T_STRING) {
     ind1 = sp->u.number;
-    ind1 = (code & 0x10) ? (u8len - ind1) : ind1;
-    if (ind1 < 0 || ind1 >= u8len) {
-      error(
-          "The 1st index to range lvalue must be >= 0 and < sizeof(indexed "
-          "value)\n");
-    }
-    ind1 = u8_egc_index_to_offset(lv->u.string, ind1);
+    if (code & 0x10 && ind1 == 0) error("push_lvalue_range: invalid ind1");
+    ind1 = (code & 0x10) ? (-1 * ind1) : ind1;
+    ind1 = iter->index_to_offset(ind1);
     if (ind1 < 0) {
       error("push_lvalue_range: invalid ind1");
     }
@@ -943,8 +937,10 @@ void copy_lvalue_range(svalue_t *from) {
 template <typename F>
 void assign_lvalue_codepoint(F &&func) {
   {
+    auto pos = global_lvalue_codepoint.index;
+
     UChar32 c = u8_egc_index_as_single_codepoint(global_lvalue_codepoint.owner->u.string,
-                                                 global_lvalue_codepoint.index);
+                                                 SVALUE_STRLEN(global_lvalue_codepoint.owner), pos);
     if (c < 0) {
       error("Invalid string index, multi-codepoint character.\n");
     }
@@ -962,13 +958,14 @@ void assign_lvalue_codepoint(F &&func) {
     }
     auto res = new_string(SVALUE_STRLEN(global_lvalue_codepoint.owner) - old_len + new_len,
                           "assign_lvalue_codepoint");
-    u8_copy_and_replace_codepoint_at(global_lvalue_codepoint.owner->u.string, res,
-                                     global_lvalue_codepoint.index, c);
+    u8_copy_and_replace_codepoint_at(*global_lvalue_codepoint.iter, res, pos, c);
 
     free_string_svalue(global_lvalue_codepoint.owner);
 
     global_lvalue_codepoint.owner->u.string = res;
     global_lvalue_codepoint.owner->subtype = STRING_MALLOC;
+    global_lvalue_codepoint.iter = std::make_unique<EGCSmartIterator>(
+        global_lvalue_codepoint.owner->u.string, SVALUE_STRLEN(global_lvalue_codepoint.owner));
   }
 }
 
@@ -2031,6 +2028,10 @@ void eval_instruction(char *p) {
         svalue_t *s = fp + EXTRACT_UCHAR(pc++);
         svalue_t *reflval = nullptr;
 
+        if (s->type != T_REF) {
+          error("Reference is invalid.\n");
+        }
+
         {
           reflval = s->u.ref->lvalue;
           if (!reflval) {
@@ -2041,8 +2042,9 @@ void eval_instruction(char *p) {
             push_number(*global_lvalue_byte.u.lvalue_byte);
             break;
           } else if (reflval->type == T_LVALUE_CODEPOINT) {
-            push_number(u8_egc_index_as_single_codepoint(global_lvalue_codepoint.owner->u.string,
-                                                         global_lvalue_codepoint.index));
+            push_number(u8_egc_index_as_single_codepoint(
+                global_lvalue_codepoint.owner->u.string,
+                SVALUE_STRLEN(global_lvalue_codepoint.owner), global_lvalue_codepoint.index));
             break;
           }
         }
@@ -2583,14 +2585,13 @@ void eval_instruction(char *p) {
         } else if (sp->type == T_STRING) {
           STACK_INC;
           sp->type = T_NUMBER;
-          global_lvalue_codepoint.index = -1;
+          global_lvalue_codepoint.index = 0;
           global_lvalue_codepoint.owner = sp - 1;
-          size_t count = 0;
-          auto success = u8_egc_count((sp - 1)->u.string, &count);
-          if (!success) {
-            error("foreach: Invalid utf-8 string.");
+          global_lvalue_codepoint.iter =
+              std::make_unique<EGCSmartIterator>((sp - 1)->u.string, SVALUE_STRLEN((sp - 1)));
+          if (!global_lvalue_codepoint.iter->ok()) {
+            error("f_foreach: Invalid utf-8 string.");
           }
-          sp->subtype = count;
         } else {
           CHECK_TYPES(sp, T_ARRAY, 2, F_FOREACH);
 
@@ -2652,27 +2653,35 @@ void eval_instruction(char *p) {
             pc -= offset;
             break;
           }
-        } else {
-          /* array or string */
-          if ((sp - 1)->subtype--) {
-            if ((sp - 2)->type == T_STRING) {
-              if (sp->type == T_REF) {
-                sp->u.ref->lvalue = &global_lvalue_codepoint_sv;
-                global_lvalue_codepoint.index++;
-              } else {
-                free_svalue(sp->u.lvalue, "foreach-string");
-                sp->u.lvalue->type = T_NUMBER;
-                sp->u.lvalue->subtype = 0;
-                sp->u.lvalue->u.number = u8_egc_index_as_single_codepoint(
-                    global_lvalue_codepoint.owner->u.string, global_lvalue_codepoint.index++);
-              }
+        } else if ((sp - 2)->type == T_STRING) { /* string */
+          auto pos =
+              global_lvalue_codepoint.iter->post_index_to_offset(global_lvalue_codepoint.index);
+          if (pos > 0) {
+            if (sp->type == T_REF) {
+              sp->u.ref->lvalue = &global_lvalue_codepoint_sv;
             } else {
-              if (sp->type == T_REF) {
-                sp->u.ref->lvalue = (sp - 1)->u.lvalue++;
-              } else {
-                assign_svalue(sp->u.lvalue, (sp - 1)->u.lvalue++);
-              }
+              free_svalue(sp->u.lvalue, "foreach-string");
+              sp->u.lvalue->type = T_NUMBER;
+              sp->u.lvalue->subtype = 0;
+              sp->u.lvalue->u.number = u8_egc_index_as_single_codepoint(
+                  global_lvalue_codepoint.owner->u.string,
+                  SVALUE_STRLEN(global_lvalue_codepoint.owner), global_lvalue_codepoint.index);
             }
+            global_lvalue_codepoint.index++;
+
+            COPY_SHORT(&offset, pc);
+            pc -= offset;
+            break;
+          }
+        } else { /* array */
+          if ((sp - 1)->subtype--) {
+            if (sp->type == T_REF) {
+              sp->u.ref->lvalue = (sp - 1)->u.lvalue;
+            } else {
+              assign_svalue(sp->u.lvalue, (sp - 1)->u.lvalue);
+            }
+            (sp - 1)->u.lvalue++;
+
             COPY_SHORT(&offset, pc);
             pc -= offset;
             break;
@@ -2690,6 +2699,7 @@ void eval_instruction(char *p) {
 
             global_lvalue_codepoint.index = 0;
             global_lvalue_codepoint.owner = nullptr;
+            global_lvalue_codepoint.iter.reset();
           } else {
             sp->u.ref->lvalue = nullptr;
           }
@@ -2708,6 +2718,10 @@ void eval_instruction(char *p) {
           sp -= 2;
           if (sp->type == T_STRING) {
             free_string_svalue(sp--);
+
+            global_lvalue_codepoint.index = 0;
+            global_lvalue_codepoint.owner = nullptr;
+            global_lvalue_codepoint.iter.reset();
           } else {
             free_array((sp--)->u.arr);
           }
@@ -3199,7 +3213,7 @@ void eval_instruction(char *p) {
               error("String index out of bounds.\n");
             }
 
-            UChar32 res = u8_egc_index_as_single_codepoint(sp->u.string, i);
+            UChar32 res = u8_egc_index_as_single_codepoint(sp->u.string, SVALUE_STRLEN(sp), i);
             if (res == -2) {
               error("String index out of bounds.\n");
             } else if (res < 0) {
@@ -3261,17 +3275,17 @@ void eval_instruction(char *p) {
             if ((sp - 1)->type != T_NUMBER) {
               error("Indexing a string with an illegal type.\n");
             }
-            size_t count;
-            auto success = u8_egc_count(sp->u.string, &count);
-            if (!success) {
-              error("Invalid UTF8 string: f_rindex.\n");
+            i = -1 * ((sp - 1)->u.number);
+            // COMPAT: RINDEX 0 is 0.
+            if (i == 0) {
+              free_string_svalue(sp);
+              (--sp)->u.number = 0;
+              break;
             }
-            i = count - (sp - 1)->u.number;
-            // COMPAT: allow str[<0] == 0
-            if ((i > count) || (i < 0)) {
+            UChar32 c = u8_egc_index_as_single_codepoint(sp->u.string, SVALUE_STRLEN(sp), i);
+            if (c == -2) {
               error("String rindex out of bounds.\n");
             }
-            UChar32 c = u8_egc_index_as_single_codepoint(sp->u.string, i);
             if (c < 0) {
               error("String rindex only work for single codepoint character.\n");
             }
@@ -3775,7 +3789,7 @@ void eval_instruction(char *p) {
           }
 
           ScopedTracer _efun_tracer(instrs[instruction].name, EventCategory::LPC_EFUN,
-                                    std::move(trace_context));
+                                    [&] { return trace_context; });
           (*efun_table[instruction - EFUN_BASE])();
         }
 

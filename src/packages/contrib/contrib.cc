@@ -1537,8 +1537,8 @@ static int file_length(const char *file) {
   struct stat st;
   FILE *f;
   int ret = 0;
-  int num;
-  char buf[2049];
+  size_t num;
+  static char buf[2049];
   char *p, *newp;
 
   file = check_valid_path(file, current_object, "file_size", 0);
@@ -1552,16 +1552,16 @@ static int file_length(const char *file) {
   if (st.st_mode & S_IFDIR) {
     return -2;
   }
-  if (!(f = fopen(file, "r"))) {
+  if (!(f = fopen(file, "rb"))) {
     return -1;
   }
 
   do {
-    num = fread(buf, 1, 2048, f);
-    p = buf - 1;
-    while ((newp = reinterpret_cast<char *>(memchr(p + 1, '\n', num)))) {
-      num -= (newp - p);
-      p = newp;
+    num = fread(buf, 1, sizeof(buf) - 1, f);
+    p = buf;
+    while ((newp = reinterpret_cast<char *>(memchr(p, '\n', num)))) {
+      num -= (newp - (p - 1));
+      p = newp + 1;
       ret++;
     }
   } while (!feof(f));
@@ -1881,10 +1881,7 @@ void f_zonetime(void) {
 #ifdef F_IS_DAYLIGHT_SAVINGS_TIME
 void f_is_daylight_savings_time(void) {
   time_t time_to_check = sp->u.number;
-  pop_stack();
-  const char *new_tz = sp->u.string;
-  pop_stack();
-
+  const char *new_tz = (sp - 1)->u.string;
   const char *old_tz = set_timezone(new_tz);
 
   if (time_to_check < 0) {
@@ -1892,6 +1889,9 @@ void f_is_daylight_savings_time(void) {
   }
   struct tm res = {};
   struct tm *t = localtime_r(&time_to_check, &res);
+
+  pop_stack();
+  pop_stack();
   if (t) {
     push_number((t->tm_isdst) > 0);
   } else {

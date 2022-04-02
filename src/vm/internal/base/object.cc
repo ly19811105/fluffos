@@ -483,6 +483,7 @@ static int restore_interior_string(char **val, svalue_t *sv) {
           newstr = new_string(len = (news - start), "restore_string");
           strcpy(newstr, start);
           if (!u8_validate(newstr)) {
+            FREE_MSTR(newstr);
             return ROB_STRING_UTF8_ERROR;
           }
           sv->u.string = newstr;
@@ -506,6 +507,7 @@ static int restore_interior_string(char **val, svalue_t *sv) {
   newstr = new_string(len, "restore_string");
   strcpy(newstr, start);
   if (!u8_validate(newstr)) {
+    FREE_MSTR(newstr);
     return ROB_STRING_UTF8_ERROR;
   }
   sv->u.string = newstr;
@@ -1926,7 +1928,8 @@ void set_nextreset(object_t *ob) {
   if (CONFIG_INT(__RC_RANDOMIZED_RESETS__)) {
     time_to_reset_secs = time_to_reset_secs / 2 + random_number(time_to_reset_secs / 2);
   }
-  ob->next_reset = g_current_gametick + time_to_gametick(std::chrono::seconds(time_to_reset_secs));
+  ob->next_reset =
+      g_current_gametick + time_to_next_gametick(std::chrono::seconds(time_to_reset_secs));
 }
 }  // namespace
 

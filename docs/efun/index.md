@@ -72,6 +72,9 @@ title: EFUN
 <div><a href='calls/call_out.html'>call_out</a></div>
 </div>
 <div class='col-sm-4 col-md-3 col-lg-3 col-xl-2'>
+<div><a href='calls/call_out_walltime.html'>call_out_walltime</a></div>
+</div>
+<div class='col-sm-4 col-md-3 col-lg-3 col-xl-2'>
 <div><a href='calls/call_stack.html'>call_stack</a></div>
 </div>
 <div class='col-sm-4 col-md-3 col-lg-3 col-xl-2'>
@@ -549,6 +552,9 @@ title: EFUN
 </div>
 <div class='col-sm-4 col-md-3 col-lg-3 col-xl-2'>
 <div><a href='interactive/snoop.html'>snoop</a></div>
+</div>
+<div class='col-sm-4 col-md-3 col-lg-3 col-xl-2'>
+<div><a href='interactive/telnet_ga.html'>telnet_ga</a></div>
 </div>
 <div class='col-sm-4 col-md-3 col-lg-3 col-xl-2'>
 <div><a href='interactive/telnet_nop.html'>telnet_nop</a></div>
@@ -1101,6 +1107,6 @@ title: EFUN
 
 <div class="alert alert-info my-4" role="alert">
     <img src="https://cdnjs.cloudflare.com/ajax/libs/octicons/8.5.0/svg/info.svg">
-    This page is auto generated on 2021-04-23 11:46:42 CST for v2019.20210324-14-g0a8fc22e-dirty.</a>
+    This page is auto generated on 2021-06-07 16:44:42 EDT for v2019.20210429-16-gd04c15db-dirty.</a>
 </div>
 

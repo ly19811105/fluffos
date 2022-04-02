@@ -34,8 +34,13 @@
 #include "vm/internal/base/svalue.h"
 #include "compiler.h"
 #include "keyword.h"
+
+#include "compiler/internal/grammar_rules.h"
 #include "grammar.autogen.h"
+
 #include "scratchpad.h"
+
+#include "symbol.h"
 
 // FIXME: in master.h
 extern struct object_t *master_ob;
@@ -156,9 +161,6 @@ static keyword_t reswords[] = {
     {"catch", L_CATCH, 0},
 #ifdef STRUCT_CLASS
     {"class", L_CLASS, 0},
-#endif
-#ifdef COMPAT_32
-    {"closure", L_BASIC_TYPE, TYPE_FUNCTION},
 #endif
     {"continue", L_CONTINUE, 0},
     {"default", L_DEFAULT, 0},
@@ -327,10 +329,7 @@ static void add_define(const char *name, int nargs, const char *exps) {
         return;
       }
       if (nargs != p->nargs || strcmp(exps, p->exps)) {
-        char buf[200 + NSIZE];
-
-        sprintf(buf, "redefinition of #define %s\n", name);
-        yywarn(buf);
+        yywarn("redefinition of #define %s\n", name);
 
         p->exps =
             reinterpret_cast<char *>(DREALLOC(p->exps, len + 1, TAG_COMPILER, "add_define: redef"));
@@ -977,6 +976,8 @@ static void handle_include(char *name, int global) {
   incstate_t *is;
   int delim, f;
 
+  symbol_record(OP_SYMBOL_INC, current_file, current_line, name);
+
   if (*name != '"' && *name != '<') {
     defn_t *d;
 
@@ -1362,6 +1363,13 @@ static int get_text_block(char *term) {
       if (c == '\n') {
         current_line++;
       }
+      if (len > 0) {
+        // Remove trailing CR
+        if (text_line[curchunk][len - 1] == '\r') {
+          text_line[curchunk][len - 1] = '\0';
+          len = len - 1;
+        }
+      }
       /*
        * make sure there's room in the current chunk for terminator (ie
        * it's simpler if we don't have to deal with a terminator that
@@ -1377,11 +1385,6 @@ static int get_text_block(char *term) {
         text_line[++curchunk] =
             reinterpret_cast<char *>(DMALLOC(MAXCHUNK, TAG_COMPILER, "text_block"));
         len = 0;
-      }
-      // Remove trailing CR
-      if (text_line[curchunk][len - 1] == '\r') {
-        text_line[curchunk][len - 1] = '\0';
-        len = len - 1;
       }
       /*
        * header
@@ -2227,15 +2230,9 @@ int yylex() {
             } else if (strcmp("echo", yytext) == 0) {
               debug_message("%s\n", sp);
             } else if (strcmp("error", yytext) == 0) {
-              char buf[MAXLINE + 1];
-              strcpy(buf, yytext);
-              strcat(buf, "\n");
-              yyerror(buf);
+              yyerror("%s\n", yytext);
             } else if (strcmp("warn", yytext) == 0) {
-              char buf[MAXLINE + 1];
-              strcpy(buf, yytext);
-              strcat(buf, "\n");
-              yywarn(buf);
+              yywarn("%s\n", yytext);
             } else if (strcmp("pragma", yytext) == 0) {
               handle_pragma(sp);
             } else if (strcmp("breakpoint", yytext) == 0) {
@@ -2247,12 +2244,6 @@ int yylex() {
             break;
           }
         } else {
-#ifdef COMPAT_32
-          if (*outp == '\'') {
-            outp++;
-            return L_LAMBDA;
-          }
-#endif
           goto badlex;
         }
       case '\'':
@@ -2529,7 +2520,7 @@ int yylex() {
                   if (U16_IS_SINGLE(res[0])) {
                     UErrorCode err = U_ZERO_ERROR;
                     int32_t written = 0;
-                    u_strToUTF8(reinterpret_cast<char *>(to), 4, &written, res, 2, &err);
+                    u_strToUTF8(reinterpret_cast<char *>(to), 4, &written, res, 1, &err);
                     if (U_FAILURE(err)) {
                       lexerror("Illegal unicode sequence.");
                       return LEX_EOF;
@@ -3485,6 +3476,7 @@ static void handle_define(char *yyt) {
   char mtext[MLEN];
   char *p, *q;
 
+  symbol_record(OP_SYMBOL_DEFINE, current_file, current_line, yyt);
   p = yyt;
   strcat(p, " ");
   q = namebuf;
@@ -3698,10 +3690,7 @@ static void add_predefine(const char *name, int nargs, const char *exps) {
 
   if ((p = lookup_define(name))) {
     if (nargs != p->nargs || strcmp(exps, p->exps)) {
-      char buf[200 + NSIZE];
-
-      sprintf(buf, "redefinition of #define %s\n", name);
-      yywarn(buf);
+      yywarn("redefinition of #define %s\n", name);
     }
     p->exps = reinterpret_cast<char *>(
         DREALLOC(p->exps, strlen(exps) + 1, TAG_PREDEFINES, "add_define: redef"));

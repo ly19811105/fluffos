@@ -5,8 +5,6 @@
 #include <string>
 #include <memory>
 #include <string.h>
-#include <unicode/brkiter.h>
-#include <unicode/unistr.h>
 
 #include "thirdparty/utf8_decoder_dfa/decoder.h"
 #include "thirdparty/widecharwidth/widechar_width.h"
@@ -14,9 +12,7 @@
 
 #include "base/internal/log.h"
 #include "base/internal/rc.h"
-#include "base/internal/tracing.h"
-
-// Addition by Yucong Sun
+#include "base/internal/EGCIterator.h"
 
 bool u8_validate(const char *s) {
   auto p = (const uint8_t *)s;
@@ -38,168 +34,120 @@ bool u8_validate(const uint8_t *s, size_t len) {
 
 std::string u8_sanitize(std::string_view src) { return utf8::replace_invalid(src); }
 
-namespace {
-typedef std::function<void(std::unique_ptr<icu::BreakIterator> &)> u8_egc_iter_callback;
-bool u8_egc_iter(const char *src, int slen, const u8_egc_iter_callback &cb) {
-  static std::unique_ptr<icu::BreakIterator> brk = nullptr;
+// Search "needle' in 'haystack', making sure it matches EGC boundary, returning byte offset.
+int32_t u8_egc_find_as_offset(EGCIterator &iter, const char *needle, size_t needle_len,
+                              bool reverse) {
+  const char *haystack = iter.data();
+  size_t haystack_len = iter.len() == -1 ? strlen(haystack) : iter.len();
 
-  /* create an iterator for graphemes */
-  if (!brk) {
-    UErrorCode status = U_ZERO_ERROR;
-    brk.reset(icu::BreakIterator::createCharacterInstance(icu::Locale::getDefault(), status));
-    if (!U_SUCCESS(status)) {
-      return false;
+  // no way
+  if (needle_len > haystack_len) {
+    return -1;
+  }
+  if (!iter.ok()) return -1;
+
+  // fast track ascii string search upto 4 characters.
+  if (!reverse) {
+    bool is_all_ascii = false;
+    for (int i = 0; i < 4 && i < needle_len; i++) {
+      char c = needle[i];
+      is_all_ascii = c >= 0;
+      if (!is_all_ascii) break;
+      if (c == '\0') break;
+      if (i == 3) is_all_ascii = false;
+    }
+    if (is_all_ascii) {
+      // strstr doesn't follow haystack_len, so we may overrun, wasting some cycles.
+      const auto *res = strstr(haystack, needle);
+      auto ret = res == nullptr ? -1 : (decltype(haystack))res - haystack;
+      if (ret >= haystack_len) ret = -1;
+      return ret;
     }
   }
 
-  UErrorCode status = U_ZERO_ERROR;
-  UText text = UTEXT_INITIALIZER;
+  int res = -1;
 
-  utext_openUTF8(&text, src, slen, &status);
-  if (!U_SUCCESS(status)) {
-    utext_close(&text);
-    return false;
+  std::string_view sv_haystack(haystack, haystack_len);
+  std::string_view sv_needle(needle, needle_len);
+  auto pos = std::string_view::npos;
+  if (!reverse) {
+    pos = 0;
+    while ((pos = sv_haystack.find(sv_needle, pos)) != std::string_view::npos) {
+      if (iter->isBoundary(pos) && iter->isBoundary(pos + sv_needle.length())) break;
+      pos++;
+    }
+  } else {
+    pos = std::string_view::npos;
+    while ((pos = sv_haystack.rfind(sv_needle, pos)) != std::string_view::npos) {
+      if (iter->isBoundary(pos) && iter->isBoundary(pos + sv_needle.length())) break;
+      pos--;
+    }
   }
-
-  status = U_ZERO_ERROR;
-  brk->setText(&text, status);
-  if (!U_SUCCESS(status)) {
-    utext_close(&text);
-    return false;
+  if (pos != std::string_view::npos) {
+    res = pos;
   }
-  brk->first();
-
-  cb(brk);
-
-  utext_close(&text);
-  return true;
-}
-}  // namespace
-
-bool u8_egc_count(const char *src, size_t *count) {
-  *count = 0;
-
-  return u8_egc_iter(src, -1, [&](std::unique_ptr<icu::BreakIterator> &brk) {
-    int total = 0;
-    brk->first();
-    while (brk->next() != icu::BreakIterator::DONE) ++total;
-    *count = total;
-  });
-}
-
-// Search "needle' in 'haystack', making sure it matches EGC boundary, returning character index,
-// not the byte offset.
-int u8_egc_find_as_index(const char *haystack, size_t haystack_len, const char *needle,
-                         size_t needle_len, bool reverse) {
-  int index = -1;
-
-  u8_egc_iter(haystack, haystack_len, [=, &index](std::unique_ptr<icu::BreakIterator> &brk) {
-    bool found = false;
-    std::unique_ptr<icu::BreakIterator> brk_tmp(brk->clone());
-    if (!reverse) {
-      brk->first();
-      while (true) {
-        auto start = brk->current();
-        if ((haystack_len - start) >= needle_len && brk_tmp->isBoundary(start + needle_len)) {
-          if (memcmp(&haystack[start], needle, needle_len) == 0) {
-            found = true;
-            break;
-          }
-        }
-        if (brk->next() == icu::BreakIterator::DONE) {
-          break;
-        }
-      }
-    } else {
-      brk->last();
-      while (true) {
-        auto start = brk->current();
-        if ((haystack_len - start) >= needle_len && brk_tmp->isBoundary(start + needle_len)) {
-          if (memcmp(&haystack[start], needle, needle_len) == 0) {
-            found = true;
-            break;
-          }
-        }
-        if (brk->previous() == icu::BreakIterator::DONE) {
-          break;
-        }
-      }
-    }
-    if (!found) {
-      index = -1;
-    } else {
-      // reverse counting
-      index = 0;
-      while (brk->previous() != icu::BreakIterator::DONE) index++;
-    }
-  });
-
-  return index;
-}
-
-// Return the egc at given index of src, if it is an single code point
-UChar32 u8_egc_index_as_single_codepoint(const char *src, int32_t index) {
-  UChar32 res = U_SENTINEL;
-
-  u8_egc_iter(src, -1, [&](std::unique_ptr<icu::BreakIterator> &brk) {
-    int32_t pos = -1;
-    {
-      pos = brk->first();
-      while (index-- > 0 && pos >= 0) {
-        pos = brk->next();
-      }
-    }
-
-    // out-of-bounds
-    if (pos < 0) {
-      res = -2;
-      return;
-    }
-
-    // index is end-of-string
-    if (src[pos] == 0) {
-      res = 0;
-      return;
-    }
-
-    auto next_pos = brk->next();
-    if (next_pos >= 0) {
-      if (next_pos - pos <= U8_MAX_LENGTH) {
-        U8_NEXT((const uint8_t *)src, pos, -1, res);
-      }
-    }
-  });
-
   return res;
 }
 
+// Return the egc at given index of src, if it is an single code point.
+// Return -2 if requested index is out of bounds
+// Return -1 if requested EGC is multi codepoint
+UChar32 u8_egc_index_as_single_codepoint(const char *src, int32_t src_len, int32_t index) {
+  UChar32 c = U_SENTINEL;
+
+  EGCSmartIterator iter(src, src_len);
+  if (!iter.ok()) return c;
+
+  auto pos = iter.index_to_offset(index);
+  // out-of-bounds
+  if (pos < 0) return -2;
+  auto post_pos = iter.post_index_to_offset(index);
+  // end-of-string
+  if (post_pos < 0) return 0;
+
+  if (post_pos - pos > U8_MAX_LENGTH) return c;
+  U8_NEXT((const uint8_t *)src, pos, -1, c);
+  return c;
+}
+
 // Copy string src to dest, replacing character at index to c. Assuming dst is already allocated.
-void u8_copy_and_replace_codepoint_at(const char *src, char *dst, int32_t index, UChar32 c) {
-  int32_t src_offset = u8_egc_index_to_offset(src, index);
+void u8_copy_and_replace_codepoint_at(EGCSmartIterator &iter, char *dst, int32_t index, UChar32 c) {
+  if (!iter.ok()) return;
+
+  const char *src = iter.data();
+  int32_t slen = iter.len();
+
+  int32_t src_offset = iter.index_to_offset(index);
   int32_t dst_offset = 0;
 
+  if (src_offset < 0) return;
   memcpy(dst, src, src_offset);
   dst_offset = src_offset;
   U8_APPEND_UNSAFE(dst, dst_offset, c);
 
   U8_FWD_1_UNSAFE(src, src_offset);
-  strcpy(dst + dst_offset, src + src_offset);
+  memcpy(dst + dst_offset, src + src_offset, slen - src_offset + 1);
 }
 
-// Get the byte offset to the egc index, doesn't check validity or bounds.
-int32_t u8_egc_index_to_offset(const char *src, int32_t index) {
-  if (index <= 0) return index;
+// Get the byte offset to the egc index, return -1 for non boundary.
+int32_t u8_offset_to_egc_index(EGCIterator &iter, int32_t offset) {
+  if (offset <= 0) return offset;
+  if (!iter.ok()) return -1;
 
-  int pos = -1;
+  int idx = -1;
+  int pos = 0;
 
-  u8_egc_iter(src, -1, [&](std::unique_ptr<icu::BreakIterator> &brk) {
-    pos = brk->first();
-    while (index-- > 0 && pos >= 0) {
-      pos = brk->next();
-    }
-  });
+  pos = iter->first();
+  idx = 0;
+  do {
+    pos = iter->next();
+    idx++;
+  } while (pos != icu::BreakIterator::DONE && pos < offset);
 
-  return pos;
+  if (pos == icu::BreakIterator::DONE) idx = -1;
+  if (pos != offset) idx = -1;
+
+  return idx;
 }
 
 // same as strncpy, copy up to maxlen bytes but will not copy broken characters.
@@ -545,26 +493,54 @@ size_t u8_width(const char *src, int len) {
     auto width = widechar_wcwidth(c);
     if (width > 0) {
       total += width;
-    } else if (width == widechar_ambiguous) {
+    } else if (width == widechar_widened_in_9) {
       total += 2;
+    } else if (width == widechar_private_use) {
+      total += 1;
+    } else if (width == widechar_ambiguous) {
+      total += 1;
     }
     if (len > 0 && src_offset >= len) break;
   }
   return total;
 }
 
-std::vector<std::string> u8_egc_split(const char *src) {
-  std::vector<std::string> result;
+std::vector<std::string_view> u8_egc_split(const char *src, int32_t slen) {
+  std::vector<std::string_view> result;
+  result.reserve(16);
 
-  u8_egc_iter(src, -1, [&](std::unique_ptr<icu::BreakIterator> &brk) {
-    brk->first();
-    auto start = brk->current();
-    while (brk->next() != icu::BreakIterator::DONE) {
-      auto size = brk->current() - start;
-      result.push_back(std::string(src + start, size));
-      start = brk->current();
+  EGCSmartIterator iter(src, slen);
+  if (!iter.ok()) return result;
+
+  iter->first();
+  auto start = iter->current();
+  while (iter->next() != icu::BreakIterator::DONE) {
+    auto size = iter->current() - start;
+    result.emplace_back(src + start, size);
+    start = iter->current();
+  }
+
+  return result;
+}
+
+// Return empty string if error or invalid translator.
+std::string u8_convert_encoding(UConverter *trans, const char *data, int len) {
+  std::string result;
+
+  if (trans) {
+    UErrorCode error_code = U_ZERO_ERROR;
+
+    auto required = ucnv_fromAlgorithmic(trans, UCNV_UTF8, nullptr, 0, data, len, &error_code);
+    if (error_code == U_BUFFER_OVERFLOW_ERROR) {
+      result.resize(required);
+
+      error_code = U_ZERO_ERROR;
+      ucnv_fromAlgorithmic(trans, UCNV_UTF8, result.data(), result.size(), data, len, &error_code);
+      if (U_FAILURE(error_code)) {
+        debug_message("add_message: Translation failed!");
+        result = "";
+      }
     }
-  });
-
+  }
   return result;
 }

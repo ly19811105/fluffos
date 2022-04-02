@@ -894,9 +894,7 @@ void f_malloc_status(void) {
 void f_map_delete(void) {
   mapping_delete((sp - 1)->u.map, sp);
   pop_stack();
-#ifndef COMPAT_32
   free_mapping((sp--)->u.map);
-#endif
 }
 #endif
 
@@ -2448,8 +2446,11 @@ void f_sizeof(void) {
       free_buffer(sp->u.buf);
       break;
     case T_STRING: {
-      auto success = u8_egc_count(sp->u.string, &i);
-      DEBUG_CHECK(!success, "Invalid UTF8 string!");
+      EGCSmartIterator iter(sp->u.string, SVALUE_STRLEN(sp));
+      if (!iter.ok()) {
+        error("f_sizeof: Invalid UTF8 string!");
+      }
+      i = iter.count();
       free_string_svalue(sp);
       break;
     }
@@ -2572,11 +2573,49 @@ void f_strsrch(void) {
   auto arg2 = sp - 1;
   auto arg3 = sp;
 
-  size_t src_len = SVALUE_STRLEN(arg1);
+  // fast track empty string search
+  if (arg1->u.string[0] == '\0') {
+    auto ret = -1;
+    if ((arg2->type == T_STRING && arg2->u.string[0] == '\0') ||
+        (arg2->type == T_NUMBER && arg2->u.number == '\0')) {
+      ret = 0;
+    }
+
+    pop_3_elems();
+    push_number(ret);
+    return;
+  }
+
+  // fast track single ascii character search
+  {
+    bool single_char_search = false;
+    char single = -1;
+    if (arg2->type == T_STRING && (arg2->u.string[0] != '\0' && arg2->u.string[1] == '\0') &&
+        U8_IS_SINGLE(arg2->u.string[0])) {
+      single = arg2->u.string[0];
+      single_char_search = true;
+    } else if (arg2->type == T_NUMBER && arg2->u.number >= 0 && arg2->u.number <= 0x7f) {
+      single = arg2->u.number;
+      single_char_search = true;
+    }
+    if (single_char_search && single >= 0) {
+      const auto *res =
+          arg3->u.number == 0 ? strchr(arg1->u.string, single) : strrchr(arg1->u.string, single);
+      auto pos = res == nullptr ? -1 : (const char *)res - arg1->u.string;
+
+      EGCIterator iter(arg1->u.string, SVALUE_STRLEN(arg1));
+      auto ret = pos == -1 || !iter.ok() ? -1 : u8_offset_to_egc_index(iter, pos);
+
+      pop_3_elems();
+      push_number(ret);
+      return;
+    }
+  }
 
   uint8_t buf[U8_MAX_LENGTH + 1] = {0};
   const char *find = nullptr;
   size_t find_len = 0;
+
   if (arg2->type == T_NUMBER) {
     UBool isError = false;
     int offset = 0;
@@ -2591,11 +2630,15 @@ void f_strsrch(void) {
     find = arg2->u.string;
     find_len = SVALUE_STRLEN(arg2);
   }
+  size_t src_len = SVALUE_STRLEN(arg1);
 
   LPC_INT ret = -1;
   // only search if there is a chance.
   if (find_len <= src_len) {
-    ret = u8_egc_find_as_index(arg1->u.string, src_len, find, find_len, arg3->u.number != 0);
+    EGCIterator iter(arg1->u.string, src_len);
+
+    auto pos = u8_egc_find_as_offset(iter, find, find_len, arg3->u.number != 0);
+    ret = pos == -1 ? -1 : u8_offset_to_egc_index(iter, pos);
   }
 
   pop_3_elems();
@@ -3101,8 +3144,7 @@ void f_dump_file_descriptors(void) {
 #ifdef F_RECLAIM_OBJECTS
 void f_reclaim_objects(void) {
   auto res = reclaim_objects(false);
-  add_gametick_event(std::chrono::seconds(0),
-                     tick_event::callback_type([] { remove_destructed_objects(); }));
+  add_gametick_event(0, tick_event::callback_type([] { remove_destructed_objects(); }));
   push_number(res);
 }
 #endif
@@ -3161,12 +3203,12 @@ void f_set_reset(void) {
 
   if (st_num_arg == 2) {
     (sp - 1)->u.ob->next_reset =
-        g_current_gametick + time_to_gametick(std::chrono::seconds(sp->u.number));
+        g_current_gametick + time_to_next_gametick(std::chrono::seconds(sp->u.number));
     free_object(&(--sp)->u.ob, "f_set_reset:1");
     sp--;
   } else {
     sp->u.ob->next_reset =
-        g_current_gametick + time_to_gametick(std::chrono::seconds(
+        g_current_gametick + time_to_next_gametick(std::chrono::seconds(
                                  time_to_reset / 2 + random_number(time_to_reset / 2)));
     free_object(&(sp--)->u.ob, "f_set_reset:2");
   }
